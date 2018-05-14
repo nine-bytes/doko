@@ -9,14 +9,18 @@ func TestBroker_Run(t *testing.T) {
 	var listenAddr = ":4443"
 	var tlsConfig *tls.Config = nil
 
-	var getAuthenticate AuthenticateFunc = func(tokenString string) (controlId string, err error) {
-		return tokenString, nil
+	var getAuthenticate AuthenticateFunc = func(authMsg *Auth) error {
+		return nil
 	}
 
-	if err := NewBroker(getAuthenticate).Run(listenAddr, tlsConfig); err != nil {
-		t.Errorf("run broker error: %v", err)
+	var reqBrokerPermission ReqBrokerPermission = func(reqBrokerMsg *ReqBroker) error {
+		return nil
 	}
 
-	t.Logf("bloking")
+	if err := NewBroker(getAuthenticate, reqBrokerPermission).Run(listenAddr, tlsConfig); err != nil {
+		t.Fatalf("run broker error: %v", err)
+	}
+
+	t.Log("bloking")
 	select {}
 }

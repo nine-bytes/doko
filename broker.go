@@ -11,18 +11,21 @@ import (
 	"sync"
 )
 
-type AuthenticateFunc func(tokenString string) (controlId string, err error)
+type AuthenticateFunc func(authMsg *Auth) error
+type ReqBrokerPermission func(reqBrokerMsg *ReqBroker) error
 
 type Broker struct {
-	getAuthenticate AuthenticateFunc
-	listener        *Listener
-	registry        *util.Registry
+	getAuthenticate     AuthenticateFunc
+	reqBrokerPermission ReqBrokerPermission
+	listener            *Listener
+	registry            *util.Registry
 }
 
-func NewBroker(getAuthenticate AuthenticateFunc) *Broker {
+func NewBroker(getAuthenticate AuthenticateFunc, reqBrokerPermission ReqBrokerPermission) *Broker {
 	return &Broker{
-		getAuthenticate: getAuthenticate,
-		registry:        util.NewRegistry(),
+		getAuthenticate:     getAuthenticate,
+		reqBrokerPermission: reqBrokerPermission,
+		registry:            util.NewRegistry(),
 	}
 }
 
@@ -59,7 +62,7 @@ func (b *Broker) daemon() {
 				b.control(conn, msg)
 
 			case *RegTunnel:
-				b.proxy(conn, msg)
+				b.tunnel(conn, msg)
 
 			case *ReqBroker:
 				b.broker(conn, msg)
@@ -73,8 +76,7 @@ func (b *Broker) daemon() {
 
 func (b *Broker) control(ctlConn net.Conn, authMsg *Auth) {
 	// authenticate firstly
-	id, err := b.getAuthenticate(authMsg.TokenString)
-	if err != nil {
+	if err := b.getAuthenticate(authMsg); err != nil {
 		ctlConn.SetWriteDeadline(time.Now().Add(rwTimeout))
 		WriteMsg(ctlConn, &AccessResp{Error: err.Error()})
 		return
@@ -82,11 +84,11 @@ func (b *Broker) control(ctlConn net.Conn, authMsg *Auth) {
 
 	// create the object
 	bc := &nodeControl{
-		id:              id,
+		id:              authMsg.Id,
 		ctlConn:         ctlConn,
 		out:             make(chan Message),
 		in:              make(chan Message),
-		proxies:         make(chan net.Conn, pxyPoolSize),
+		tunnels:         make(chan net.Conn, pxyPoolSize),
 		lastPing:        time.Now(),
 		writerShutdown:  util.NewShutdown(),
 		readerShutdown:  util.NewShutdown(),
@@ -97,7 +99,7 @@ func (b *Broker) control(ctlConn net.Conn, authMsg *Auth) {
 	}
 
 	// register the control
-	if old := b.registry.Add(id, bc); old != nil {
+	if old := b.registry.Add(authMsg.Id, bc); old != nil {
 		// old had been kicked out
 		// routine for shutdown the old one
 		go func(old *nodeControl) {
@@ -123,13 +125,12 @@ func (b *Broker) control(ctlConn net.Conn, authMsg *Auth) {
 	// send success message
 	util.PanicToError(func() { bc.out <- new(AccessResp) })
 
-	log.Debug("Broker::control authenticate with id: %v", id)
+	log.Debug("Broker::control authenticate with id: %v", authMsg.Id)
 }
 
-func (b *Broker) proxy(pxyConn net.Conn, authMsg *RegTunnel) {
+func (b *Broker) tunnel(pxyConn net.Conn, reqTunnel *RegTunnel) {
 	// authenticate firstly
-	id, err := b.getAuthenticate(authMsg.TokenString)
-	if err != nil {
+	if err := b.getAuthenticate(&reqTunnel.Auth); err != nil {
 		pxyConn.SetWriteDeadline(time.Now().Add(rwTimeout))
 		WriteMsg(pxyConn, &AccessResp{Error: err.Error()})
 		return
@@ -141,31 +142,31 @@ func (b *Broker) proxy(pxyConn net.Conn, authMsg *RegTunnel) {
 		return
 	}
 
-	// look up the control for this proxy conn
+	// look up the control for this tunnel conn
 	var ctl *nodeControl
-	if tmp, ok := b.registry.Get(id); !ok {
-		log.Debug("Broker::proxy registering new proxy for %s", id)
+	if tmp, ok := b.registry.Get(reqTunnel.Auth.Id); !ok {
+		log.Debug("Broker::tunnel registering new tunnel for %s", reqTunnel.Auth.Id)
 		pxyConn.Close()
 		return
 	} else {
 		ctl = tmp.(*nodeControl)
 	}
 
-	log.Debug("Broker::proxy registering new proxy for %s", id)
-	ctl.regProxy(pxyConn)
+	log.Debug("Broker::tunnel registering new tunnel for %s", reqTunnel.Auth.Id)
+	ctl.regTunnel(pxyConn)
 }
 
 func (b *Broker) broker(srcConn net.Conn, reqBrokerMsg *ReqBroker) {
 	defer srcConn.Close()
 
-	srcId, err := b.getAuthenticate(reqBrokerMsg.TokenString)
-	if err != nil {
+	// authenticate
+	if err := b.reqBrokerPermission(reqBrokerMsg); err != nil {
 		srcConn.SetWriteDeadline(time.Now().Add(rwTimeout))
 		WriteMsg(srcConn, &AccessResp{Error: err.Error()})
 		return
 	}
 
-	// look up the control connection for this proxy
+	// look up the control connection for this tunnel
 	var dstCtl *nodeControl
 	if tmp, ok := b.registry.Get(reqBrokerMsg.DstId); !ok {
 		log.Debug("Broker::broker no control found for target control id: %s", reqBrokerMsg.DstId)
@@ -175,10 +176,10 @@ func (b *Broker) broker(srcConn net.Conn, reqBrokerMsg *ReqBroker) {
 	}
 
 	log.Debug("Broker:broker get dstConn for %s", dstCtl.id)
-	dstConn, err := dstCtl.getProxy(srcId, reqBrokerMsg.DstAddr)
+	dstConn, err := dstCtl.getTunnel(reqBrokerMsg)
 	if err != nil {
 		srcConn.SetWriteDeadline(time.Now().Add(rwTimeout))
-		WriteMsg(srcConn, &AccessResp{Error: "failed to get proxy connection of target control"})
+		WriteMsg(srcConn, &AccessResp{Error: "failed to get tunnel connection of target control"})
 		return
 	}
 	defer dstConn.Close()
@@ -190,7 +191,7 @@ func (b *Broker) broker(srcConn net.Conn, reqBrokerMsg *ReqBroker) {
 	}
 
 	srcConn.SetDeadline(time.Time{})
-	// join the public and proxy connections
+	// join the public and tunnel connections
 	log.Debug("start joining srcConn, dstConn")
 
 	p := NewPlumber(srcConn, dstConn)
@@ -232,8 +233,8 @@ type nodeControl struct {
 	// the last time we received a ping from the control - for heartbeats
 	lastPing time.Time
 
-	// proxy connections
-	proxies chan net.Conn
+	// tunnel connections
+	tunnels chan net.Conn
 
 	// synchronizer for controlled shutdown of writer()
 	writerShutdown *util.Shutdown
@@ -380,10 +381,10 @@ func (nc *nodeControl) stopper() {
 	// close connection fully
 	nc.ctlConn.Close()
 
-	// close all of the proxy connections
-	close(nc.proxies)
+	// close all of the tunnel connections
+	close(nc.tunnels)
 	wg := new(sync.WaitGroup)
-	for p := range nc.proxies {
+	for p := range nc.tunnels {
 		wg.Add(1)
 		go func(p net.Conn, wg *sync.WaitGroup) {
 			defer wg.Done()
@@ -395,29 +396,29 @@ func (nc *nodeControl) stopper() {
 	log.Debug("nodeControl::stopper shutdown %s complete!", nc.id)
 }
 
-// Remove a proxy connection from the pool and return it
-// If not proxy connections are in the pool, request one
+// Remove a tunnel connection from the pool and return it
+// If not tunnel connections are in the pool, request one
 // and wait until it is available
-// Returns an error if we couldn't get a proxy because it took too long
+// Returns an error if we couldn't get a tunnel because it took too long
 // or the tunnel is closing
-func (nc *nodeControl) getProxy(srcId, dstAddr string) (pxyConn net.Conn, err error) {
+func (nc *nodeControl) getTunnel(reqBrokerMsg *ReqBroker) (tunConn net.Conn, err error) {
 	var ok bool
 	for {
 		for {
-			// get a proxy connection from the pool
+			// get a tunnel connection from the pool
 			select {
-			case pxyConn, ok = <-nc.proxies:
+			case tunConn, ok = <-nc.tunnels:
 				if !ok {
-					return nil, errors.New("no proxy connections available, control is closing")
+					return nil, errors.New("no tunnel connections available, control is closing")
 				}
-				log.Debug("nodeControl::getProxy get a proxy connection from pool")
+				log.Debug("nodeControl::getTunnel get a tunnel connection from pool")
 				goto end
 			default:
-				// no proxy available in the pool, ask for one over the control channel
-				log.Debug("nodeControl::getProxy no proxy in pool, send ReqProxy message...")
+				// no tunnel available in the pool, ask for one over the control channel
+				log.Debug("nodeControl::getTunnel no tunnel in pool, send ReqTunnel message...")
 				if err = util.PanicToError(func() { nc.out <- new(ReqTunnel) }); err != nil {
-					// c.out is closed, impossible to get a proxy connection
-					log.Debug("nodeControl::getProxy send message to c.out error: %v", err)
+					// c.out is closed, impossible to get a tunnel connection
+					log.Debug("nodeControl::getTunnel send message to c.out error: %v", err)
 					return
 				}
 
@@ -425,45 +426,44 @@ func (nc *nodeControl) getProxy(srcId, dstAddr string) (pxyConn net.Conn, err er
 				case <-time.After(dialTimeout):
 					// try again, never stop believing
 					continue
-				case pxyConn, ok = <-nc.proxies:
+				case tunConn, ok = <-nc.tunnels:
 					if !ok {
-						return nil, errors.New("no proxy connections available, control is closing")
+						return nil, errors.New("no tunnel connections available, control is closing")
 					}
 				}
-				log.Debug("nodeControl::getProxy get a proxy connection after sending ReqProxy")
+				log.Debug("nodeControl::getTunnel get a tunnel connection after sending ReqTunnel")
 				goto end
 			}
 		}
 
 	end:
 		{
-			// try to send StartProxy message
-			log.Debug("nodeControl::getProxy try to send StartProxy.TargetAddr: %s", dstAddr)
-			if err := WriteMsg(pxyConn, &StartTunnel{SrcId: srcId, DstAddr: dstAddr}); err != nil {
-				// this proxy connection is reached deadline
-				log.Debug("nodeControl::getProxy failed to send ping: %v", err)
-				pxyConn.Close()
-				pxyConn = nil
+			// try to send StartTunnel message
+			if err := WriteMsg(tunConn, &StartTunnel{*reqBrokerMsg}); err != nil {
+				// this tunnel connection is reached deadline
+				log.Debug("nodeControl::getTunnel failed to send ping: %v", err)
+				tunConn.Close()
+				tunConn = nil
 				continue
 			}
 
 			// receive response message
 			resp := new(AccessResp)
-			pxyConn.SetReadDeadline(time.Now().Add(rwTimeout))
-			if err := ReadMsgInto(pxyConn, resp); err != nil {
-				log.Debug("nodeControl::getProxy failed to receive response message: %v", err)
-				pxyConn.Close()
-				pxyConn = nil
+			tunConn.SetReadDeadline(time.Now().Add(rwTimeout))
+			if err := ReadMsgInto(tunConn, resp); err != nil {
+				log.Debug("nodeControl::getTunnel failed to receive response message: %v", err)
+				tunConn.Close()
+				tunConn = nil
 				continue
 			}
 
 			if resp.Error != "" {
-				log.Debug("nodeControl::getProxy failed with response: %s", resp.Error)
-				pxyConn.Close()
+				log.Debug("nodeControl::getTunnel failed with response: %s", resp.Error)
+				tunConn.Close()
 				return nil, errors.New(resp.Error)
 			}
 
-			pxyConn.SetDeadline(time.Time{})
+			tunConn.SetDeadline(time.Time{})
 
 			util.PanicToError(func() { nc.out <- new(ReqTunnel) })
 			break
@@ -473,12 +473,12 @@ func (nc *nodeControl) getProxy(srcId, dstAddr string) (pxyConn net.Conn, err er
 	return
 }
 
-func (nc *nodeControl) regProxy(pxyConn net.Conn) {
+func (nc *nodeControl) regTunnel(pxyConn net.Conn) {
 	select {
-	case nc.proxies <- pxyConn:
+	case nc.tunnels <- pxyConn:
 		pxyConn.SetDeadline(time.Now().Add(pxyStaleDuration))
 	default:
-		log.Debug("nodeControl::regProxy proxies buffer is full, discarding.")
+		log.Debug("nodeControl::regTunnel proxies buffer is full, discarding.")
 		pxyConn.Close()
 	}
 }

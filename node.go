@@ -13,14 +13,15 @@ import (
 	"sync"
 )
 
-type ReqPermissionFunc func(startProxy *StartTunnel) error
+type GetDstConnFunc func(startTunnelMsg *StartTunnel) (net.Conn, error)
 
 type Node struct {
 	// broker info
-	tokenString      string
-	brokerAddr       string
-	tlsConfig        *tls.Config
-	getReqPermission ReqPermissionFunc
+	id          string
+	tokenString string
+	brokerAddr  string
+	tlsConfig   *tls.Config
+	getDstConn  GetDstConnFunc
 
 	shutdown  *util.Shutdown // running instance shutdown
 	plumbers  *util.Set      // unlimited capacity set
@@ -28,13 +29,14 @@ type Node struct {
 	sync.RWMutex
 }
 
-func NewNode(tokenString, brokerAddr string, tlsConfig *tls.Config, getReqPermission ReqPermissionFunc) (node *Node) {
+func NewNode(id, tokenString, brokerAddr string, tlsConfig *tls.Config, getDstConn GetDstConnFunc) (node *Node) {
 	return &Node{
-		tokenString:      tokenString,
-		brokerAddr:       brokerAddr,
-		tlsConfig:        tlsConfig,
-		getReqPermission: getReqPermission,
-		plumbers:         util.NewSet(0),
+		id:          id,
+		tokenString: tokenString,
+		brokerAddr:  brokerAddr,
+		tlsConfig:   tlsConfig,
+		getDstConn:  getDstConn,
+		plumbers:    util.NewSet(0),
 	}
 }
 
@@ -100,7 +102,7 @@ func (n *Node) run() (shutdown *util.Shutdown, err error) {
 
 	// authenticate with the broker
 	ctlConn.SetWriteDeadline(time.Now().Add(rwTimeout))
-	if err = WriteMsg(ctlConn, &Auth{TokenString: n.tokenString, ProtocolVersion: protocolVersion}); err != nil {
+	if err = WriteMsg(ctlConn, &Auth{Id: n.id, TokenString: n.tokenString, ProtocolVersion: protocolVersion}); err != nil {
 		ctlConn.Close()
 		log.Error("Client::run send authenticate message error: %v", err)
 		return
@@ -318,68 +320,61 @@ func (n *Node) regTunnel() {
 	)
 
 	if pxyConn, err = Dial("tcp", n.brokerAddr, dialTimeout, n.tlsConfig); err != nil {
-		log.Error("Client::regProxy failed to establish proxy connection: %v", err)
+		log.Error("Client::regTunnel failed to establish tunnel connection: %v", err)
 		return
 	}
 
 	defer pxyConn.Close()
 
 	pxyConn.SetWriteDeadline(time.Now().Add(rwTimeout))
-	if err = WriteMsg(pxyConn, &RegTunnel{TokenString: n.tokenString, ProtocolVersion: protocolVersion}); err != nil {
-		log.Error("Client::regProxy send RegProxy message error: %v", err)
+	if err = WriteMsg(pxyConn, &RegTunnel{Auth{Id: n.id, TokenString: n.tokenString, ProtocolVersion: protocolVersion}}); err != nil {
+		log.Error("Client::regTunnel send RegTunnel message error: %v", err)
 		return
 	}
 
 	resp := new(AccessResp)
 	pxyConn.SetReadDeadline(time.Now().Add(rwTimeout))
 	if err = ReadMsgInto(pxyConn, resp); err != nil {
-		log.Error("Client::regProxy receive authenticate response error: %v", err)
+		log.Error("Client::regTunnel receive authenticate response error: %v", err)
 		return
 	}
 
 	if resp.Error != "" {
-		log.Info("Client::regProxy authenticate denied: %v", resp.Error)
+		log.Info("Client::regTunnel authenticate denied: %v", resp.Error)
 		return
 	}
 
-	// wait for StartProxy message
-	//log.Debug("Client::regProxy wait for StartProxy")
+	// wait for StartTunnel message
+	//log.Debug("Client::regTunnel wait for StartTunnel")
 	pxyConn.SetDeadline(time.Now().Add(pxyStaleDuration))
-	startProxy := new(StartTunnel)
-	if err = ReadMsgInto(pxyConn, startProxy); err != nil {
-		log.Debug("Client::regProxy try receive StartProxy error: %v", err)
+	startTunnelMsg := new(StartTunnel)
+	if err = ReadMsgInto(pxyConn, startTunnelMsg); err != nil {
+		log.Debug("Client::regTunnel try receive StartTunnel error: %v", err)
 		return
 	}
 
-	log.Debug("Client::regProxy received startProxy: %v", startProxy)
-	if err := n.getReqPermission(startProxy); err != nil {
-		log.Debug("Client::regProxy request permission denied: %v", err)
-		pxyConn.SetWriteDeadline(time.Now().Add(rwTimeout))
-		WriteMsg(pxyConn, &AccessResp{Error: err.Error()})
-		return
-	}
-
-	localConn, err := Dial("tcp", startProxy.DstAddr, dialTimeout, nil)
+	log.Debug("Client::regTunnel received StartTunnel: %v", startTunnelMsg)
+	dstConn, err := n.getDstConn(startTunnelMsg)
 	if err != nil {
-		log.Error("Client::regProxy dial dst error: %v", err)
+		log.Debug("Client::regTunnel getDstConn error: %v", err)
 		pxyConn.SetWriteDeadline(time.Now().Add(rwTimeout))
 		WriteMsg(pxyConn, &AccessResp{Error: err.Error()})
 		return
 	}
-	defer localConn.Close()
+	defer dstConn.Close()
 
 	pxyConn.SetWriteDeadline(time.Now().Add(rwTimeout))
 	if err = WriteMsg(pxyConn, new(AccessResp)); err != nil {
-		log.Error("Client::regProxy send success message error: %v", err)
+		log.Error("Client::regTunnel send success message error: %v", err)
 		return
 	}
 
 	pxyConn.SetDeadline(time.Time{})
 
-	log.Debug("Client::regProxy start joining localConn, pxyConn")
-	p := NewPlumber(localConn, pxyConn)
+	log.Debug("Client::regTunnel start joining localConn, pxyConn")
+	p := NewPlumber(dstConn, pxyConn)
 	bytes2LocalConn, bytes2PxyConn := p.Pipe(bytesForRate)
-	log.Debug("Client::regProxy bytes2LocalConn:%d bytes2PxyConn:%d", bytes2LocalConn, bytes2PxyConn)
+	log.Debug("Client::regTunnel bytes2LocalConn:%d bytes2PxyConn:%d", bytes2LocalConn, bytes2PxyConn)
 }
 
 func (n *Node) ReqBroker(dstId, dstAddr string, localConn net.Conn) {
@@ -399,7 +394,7 @@ func (n *Node) ReqBroker(dstId, dstAddr string, localConn net.Conn) {
 	)
 
 	if reqConn, err = Dial("tcp", n.brokerAddr, dialTimeout, n.tlsConfig); err != nil {
-		log.Error("Client::ReqBroker failed to establish proxy connection: %v", err)
+		log.Error("Client::ReqBroker failed to establish tunnel connection: %v", err)
 		n.RUnlock()
 		return
 	}
@@ -409,12 +404,15 @@ func (n *Node) ReqBroker(dstId, dstAddr string, localConn net.Conn) {
 	// send ReqBroker message
 	reqConn.SetWriteDeadline(time.Now().Add(rwTimeout))
 	if err = WriteMsg(reqConn, &ReqBroker{
-		TokenString:     n.tokenString,
-		DstId:           dstId,
-		DstAddr:         dstAddr,
-		ProtocolVersion: protocolVersion,
+		Auth: Auth{
+			Id:              n.id,
+			TokenString:     n.tokenString,
+			ProtocolVersion: protocolVersion,
+		},
+		DstId:   dstId,
+		DstAddr: dstAddr,
 	}); err != nil {
-		log.Error("Client::ReqBroker send RegProxy message error: %v", err)
+		log.Error("Client::ReqBroker send RegTunnel message error: %v", err)
 		n.RUnlock()
 		return
 	}
@@ -443,7 +441,7 @@ func (n *Node) ReqBroker(dstId, dstAddr string, localConn net.Conn) {
 
 	// block until pipe complete
 	bytes2LocalConn, bytes2reqConn := p.Pipe(bytesForRate)
-	log.Debug("Client::regProxy bytes2LocalConn:%d bytes2reqConn:%d", bytes2LocalConn, bytes2reqConn)
+	log.Debug("Client::ReqBroker bytes2LocalConn:%d bytes2reqConn:%d", bytes2LocalConn, bytes2reqConn)
 }
 
 func (n *Node) Stop() {

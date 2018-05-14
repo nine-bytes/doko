@@ -34,15 +34,18 @@ type Envelope struct {
 
 type AccessResp struct{ Error string }
 
-type Auth struct{ TokenString, ProtocolVersion string }
+type Auth struct{ Id, TokenString, ProtocolVersion string }
 
-type ReqBroker struct{ TokenString, DstId, DstAddr, ProtocolVersion string }
+type ReqBroker struct {
+	Auth
+	DstId, DstAddr string
+}
 
 type ReqTunnel struct{}
 
-type RegTunnel struct{ TokenString, ProtocolVersion string }
+type RegTunnel struct{ Auth }
 
-type StartTunnel struct{ SrcId, DstAddr string }
+type StartTunnel struct{ ReqBroker }
 
 type Ping struct{}
 

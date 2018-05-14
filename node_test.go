@@ -3,21 +3,22 @@ package doko
 import (
 	"testing"
 	"crypto/tls"
-	"github.com/nine-bytes/util/log"
 	"github.com/gin-gonic/gin"
 	"net/http"
+	"net"
 )
 
 func TestNode(t *testing.T) {
 	var brokerAddr = "localhost:4443"
-	var targetAddr = "192.168.2.142:8088"
+	var targetAddr = "192.168.2.161:8088"
+	var ginAddr = ":8080"
 	var tlsConfig *tls.Config = nil
-	var getReqPermission ReqPermissionFunc = func(startProxy *StartTunnel) error {
-		return nil
+	var getDstConnFunc GetDstConnFunc = func(startTunnel *StartTunnel) (net.Conn, error) {
+		return Dial("tcp", startTunnel.DstAddr, dialTimeout, nil)
 	}
-	var node1 = NewNode("1", brokerAddr, tlsConfig, getReqPermission)
-	var node2 = NewNode("2", brokerAddr, tlsConfig, getReqPermission)
-	var node3 = NewNode("3", brokerAddr, tlsConfig, getReqPermission)
+	var node1 = NewNode("1", "", brokerAddr, tlsConfig, getDstConnFunc)
+	var node2 = NewNode("2", "", brokerAddr, tlsConfig, getDstConnFunc)
+	var node3 = NewNode("3", "", brokerAddr, tlsConfig, getDstConnFunc)
 
 	if err := node1.Start(); err != nil {
 		t.Fatalf("node1 run error: %v", err)
@@ -39,11 +40,11 @@ func TestNode(t *testing.T) {
 		for {
 			localConn, ok := <-listener1.ConnChan
 			if !ok {
-				t.Logf("listener1.ConnChan closed")
+				t.Log("listener1.ConnChan closed")
 				return
 			}
 
-			log.Debug("node 1 reqBroker for target 2")
+			t.Log("node 1 reqBroker for target 2")
 			go node1.ReqBroker("2", targetAddr, localConn)
 		}
 	}()
@@ -56,11 +57,11 @@ func TestNode(t *testing.T) {
 		for {
 			localConn, ok := <-listener3.ConnChan
 			if !ok {
-				t.Logf("listener1.ConnChan closed")
+				t.Log("listener1.ConnChan closed")
 				return
 			}
 
-			log.Debug("node 3 reqBroker for target 2")
+			t.Log("node 3 reqBroker for target 2")
 			go node3.ReqBroker("2", targetAddr, localConn)
 		}
 	}()
@@ -93,7 +94,7 @@ func TestNode(t *testing.T) {
 		context.String(http.StatusOK, "stop 2 success")
 	})
 
-	if err := e.Run(":8080"); err != nil {
-		t.Errorf("run gin app error: %v", err)
+	if err := e.Run(ginAddr); err != nil {
+		t.Errorf("run gin error: %v", err)
 	}
 }
