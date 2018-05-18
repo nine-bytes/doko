@@ -7,7 +7,7 @@ import (
 	"time"
 	"runtime/debug"
 	"github.com/nine-bytes/util"
-	"github.com/nine-bytes/util/log"
+	"github.com/nine-bytes/log"
 	"io"
 	"errors"
 	"sync"

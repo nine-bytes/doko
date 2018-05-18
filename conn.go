@@ -2,7 +2,7 @@ package doko
 
 import (
 	"github.com/nine-bytes/util"
-	"github.com/nine-bytes/util/log"
+	"github.com/nine-bytes/log"
 	"crypto/tls"
 	"net"
 	"time"
