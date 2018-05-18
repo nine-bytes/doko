@@ -51,7 +51,7 @@
   branch = "master"
   name = "github.com/nine-bytes/util"
   packages = ["."]
-  revision = "b2d743ba817b55d48f15b9ff2ed3dde7212c34bf"
+  revision = "5a106f95aa95d9145c82b159af42ff29f36d2c08"
 
 [[projects]]
   name = "github.com/ugorji/go"
@@ -66,36 +66,10 @@
   revision = "7c87d13f8e835d2fb3a70a2912c811ed0c1d241b"
 
 [[projects]]
-  name = "golang.org/x/text"
-  packages = [
-    "encoding",
-    "encoding/internal",
-    "encoding/internal/identifier",
-    "encoding/simplifiedchinese",
-    "internal/gen",
-    "transform",
-    "unicode/cldr"
-  ]
-  revision = "f21a4dfb5e38f5895301dc265a8def02365cc3d0"
-  version = "v0.3.0"
-
-[[projects]]
-  branch = "v3"
-  name = "gopkg.in/alexcesaro/quotedprintable.v3"
-  packages = ["."]
-  revision = "2caba252f4dc53eaf6b553000885530023f54623"
-
-[[projects]]
   name = "gopkg.in/go-playground/validator.v8"
   packages = ["."]
   revision = "5f1438d3fca68893a817e4a66806cea46a9e4ebf"
   version = "v8.18.2"
-
-[[projects]]
-  name = "gopkg.in/gomail.v2"
-  packages = ["."]
-  revision = "81ebce5c23dfd25c6c67194b37d3dd3f338c98b1"
-  version = "2.0.0"
 
 [[projects]]
   name = "gopkg.in/yaml.v2"

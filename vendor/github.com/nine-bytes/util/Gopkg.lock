@@ -7,35 +7,9 @@
   revision = "06ea1031745cb8b3dab3f6a236daf2b0aa468b7e"
   version = "v3.2.0"
 
-[[projects]]
-  name = "golang.org/x/text"
-  packages = [
-    "encoding",
-    "encoding/internal",
-    "encoding/internal/identifier",
-    "encoding/simplifiedchinese",
-    "internal/gen",
-    "transform",
-    "unicode/cldr"
-  ]
-  revision = "f21a4dfb5e38f5895301dc265a8def02365cc3d0"
-  version = "v0.3.0"
-
-[[projects]]
-  branch = "v3"
-  name = "gopkg.in/alexcesaro/quotedprintable.v3"
-  packages = ["."]
-  revision = "2caba252f4dc53eaf6b553000885530023f54623"
-
-[[projects]]
-  name = "gopkg.in/gomail.v2"
-  packages = ["."]
-  revision = "81ebce5c23dfd25c6c67194b37d3dd3f338c98b1"
-  version = "2.0.0"
-
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "8407a064dec503e1e2d2b0645e54a68ad78df48d439a92a9f07fe3f8c8587b98"
+  inputs-digest = "04a2e75d7414419991125daf2ac2bf2644bd74c07ffd53b142d2b8073f8f2565"
   solver-name = "gps-cdcl"
   solver-version = 1
