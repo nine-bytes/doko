@@ -2,12 +2,6 @@
 
 
 [[projects]]
-  name = "github.com/dgrijalva/jwt-go"
-  packages = ["."]
-  revision = "06ea1031745cb8b3dab3f6a236daf2b0aa468b7e"
-  version = "v3.2.0"
-
-[[projects]]
   branch = "master"
   name = "github.com/gin-contrib/sse"
   packages = ["."]
@@ -42,18 +36,6 @@
   version = "v0.0.3"
 
 [[projects]]
-  branch = "master"
-  name = "github.com/nine-bytes/log"
-  packages = ["."]
-  revision = "46aba79cd52f7e5317ed6e6a3ecc44e3347296b5"
-
-[[projects]]
-  branch = "master"
-  name = "github.com/nine-bytes/util"
-  packages = ["."]
-  revision = "5a106f95aa95d9145c82b159af42ff29f36d2c08"
-
-[[projects]]
   name = "github.com/ugorji/go"
   packages = ["codec"]
   revision = "b4c50a2b199d93b13dc15e78929cfb23bfdf21ab"
@@ -80,6 +62,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "fd92926932fc4f2456b3b99e6a5f854e369d8b56a30b04a08dd6eab608dd17e1"
+  inputs-digest = "90a083fe5ab481f1e96efc3625fd82205bc858a1f7e9672d6b475ab57a3c4996"
   solver-name = "gps-cdcl"
   solver-version = 1
