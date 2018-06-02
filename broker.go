@@ -18,14 +18,14 @@ type Broker struct {
 	getAuthenticate     AuthenticateFunc
 	reqBrokerPermission ReqBrokerPermission
 	listener            *Listener
-	registry            *util.Registry
+	controllers         *util.Registry
 }
 
 func NewBroker(getAuthenticate AuthenticateFunc, reqBrokerPermission ReqBrokerPermission) *Broker {
 	return &Broker{
 		getAuthenticate:     getAuthenticate,
 		reqBrokerPermission: reqBrokerPermission,
-		registry:            util.NewRegistry(),
+		controllers:         util.NewRegistry(),
 	}
 }
 
@@ -36,6 +36,14 @@ func (b *Broker) Run(listenerAddr string, tlsConfig *tls.Config) (err error) {
 
 	go b.daemon()
 	return nil
+}
+
+func (b *Broker) AllController(f func(id string, controller *NodeController)) {
+	b.controllers.All(func(key, value interface{}) { f(key.(string), value.(*NodeController)) })
+}
+
+func (b *Broker) EachController(f func(id string, controller *NodeController, stop *bool)) {
+	b.controllers.Each(func(key, value interface{}, stop *bool) { f(key.(string), value.(*NodeController), stop) })
 }
 
 func (b *Broker) daemon() {
@@ -79,12 +87,14 @@ func (b *Broker) control(ctlConn net.Conn, authMsg *Auth) {
 	if err := b.getAuthenticate(authMsg); err != nil {
 		ctlConn.SetWriteDeadline(time.Now().Add(rwTimeout))
 		WriteMsg(ctlConn, &AccessResp{Error: err.Error()})
+		ctlConn.Close()
 		return
 	}
 
 	// create the object
-	bc := &nodeControl{
+	bc := &NodeController{
 		id:              authMsg.Id,
+		authMsg:         authMsg,
 		ctlConn:         ctlConn,
 		out:             make(chan Message),
 		in:              make(chan Message),
@@ -99,10 +109,10 @@ func (b *Broker) control(ctlConn net.Conn, authMsg *Auth) {
 	}
 
 	// register the control
-	if old := b.registry.Add(authMsg.Id, bc); old != nil {
+	if old := b.controllers.Add(authMsg.Id, bc); old != nil {
 		// old had been kicked out
 		// routine for shutdown the old one
-		go func(old *nodeControl) {
+		go func(old *NodeController) {
 			// send bye message to avoid control reconnect
 			if err := util.PanicToError(func() { old.out <- new(Bye) }); err != nil {
 				log.Debug("send Bye message error: %v", err)
@@ -113,7 +123,7 @@ func (b *Broker) control(ctlConn net.Conn, authMsg *Auth) {
 
 			// tell the old one to shutdown
 			old.shutdown.Begin()
-		}(old.(*nodeControl))
+		}(old.(*NodeController))
 	}
 
 	// start four goroutines
@@ -133,6 +143,7 @@ func (b *Broker) tunnel(pxyConn net.Conn, reqTunnel *RegTunnel) {
 	if err := b.getAuthenticate(&reqTunnel.Auth); err != nil {
 		pxyConn.SetWriteDeadline(time.Now().Add(rwTimeout))
 		WriteMsg(pxyConn, &AccessResp{Error: err.Error()})
+		pxyConn.Close()
 		return
 	}
 
@@ -143,13 +154,13 @@ func (b *Broker) tunnel(pxyConn net.Conn, reqTunnel *RegTunnel) {
 	}
 
 	// look up the control for this tunnel conn
-	var ctl *nodeControl
-	if tmp, ok := b.registry.Get(reqTunnel.Auth.Id); !ok {
+	var ctl *NodeController
+	if tmp, ok := b.controllers.Get(reqTunnel.Auth.Id); !ok {
 		log.Debug("Broker::tunnel registering new tunnel for %s", reqTunnel.Auth.Id)
 		pxyConn.Close()
 		return
 	} else {
-		ctl = tmp.(*nodeControl)
+		ctl = tmp.(*NodeController)
 	}
 
 	log.Debug("Broker::tunnel registering new tunnel for %s", reqTunnel.Auth.Id)
@@ -167,12 +178,12 @@ func (b *Broker) broker(srcConn net.Conn, reqBrokerMsg *ReqBroker) {
 	}
 
 	// look up the control connection for this tunnel
-	var dstCtl *nodeControl
-	if tmp, ok := b.registry.Get(reqBrokerMsg.DstId); !ok {
+	var dstCtl *NodeController
+	if tmp, ok := b.controllers.Get(reqBrokerMsg.DstId); !ok {
 		log.Debug("Broker::broker no control found for target control id: %s", reqBrokerMsg.DstId)
 		return
 	} else {
-		dstCtl = tmp.(*nodeControl)
+		dstCtl = tmp.(*NodeController)
 	}
 
 	log.Debug("Broker:broker get dstConn for %s", dstCtl.id)
@@ -209,14 +220,17 @@ func (b *Broker) broker(srcConn net.Conn, reqBrokerMsg *ReqBroker) {
 	log.Debug("Broker::broker bytes2Src :%d bytes2Dst:%d", bytes2Src, bytes2Dst)
 }
 
-type nodeControl struct {
+type NodeController struct {
 	// id of the control
 	id string
 
-	// main control connection
+	// authMsg
+	authMsg *Auth
+
+	// main controller connection
 	ctlConn net.Conn
 
-	// broker of the control
+	// broker of the controller
 	broker *Broker
 
 	// unlimited capacity set
@@ -224,35 +238,39 @@ type nodeControl struct {
 	stopping    bool
 	stopRWMutex sync.RWMutex
 
-	// put a message in this channel to send it over conn to the control
+	// put a message in this channel to send it over conn to the controller
 	out chan Message
 
-	// read from this channel to get the next message sent to us over conn by the control
+	// read from this channel to get the next message sent to us over conn by the controller
 	in chan Message
 
-	// the last time we received a ping from the control - for heartbeats
+	// the last time we received a ping from the controller - for heartbeats
 	lastPing time.Time
 
 	// tunnel connections
 	tunnels chan net.Conn
 
-	// synchronizer for controlled shutdown of writer()
+	// synchronizer for writer()
 	writerShutdown *util.Shutdown
 
-	// synchronizer for controlled shutdown of reader()
+	// synchronizer for reader()
 	readerShutdown *util.Shutdown
 
-	// synchronizer for controlled shutdown of manager()
+	// synchronizer for manager()
 	managerShutdown *util.Shutdown
 
-	// synchronizer for controller shutdown of entire control
+	// synchronizer for entire controller
 	shutdown *util.Shutdown
 }
 
-func (nc *nodeControl) manager() {
+func (nc *NodeController) AuthMsg() *Auth {
+	return nc.authMsg
+}
+
+func (nc *NodeController) manager() {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Error("nodeControl::manager recover with error: %v, stack: %s", err, debug.Stack())
+			log.Error("NodeController::manager recover with error: %v, stack: %s", err, debug.Stack())
 		}
 	}()
 
@@ -270,35 +288,35 @@ func (nc *nodeControl) manager() {
 		select {
 		case <-pingCheck.C:
 			if time.Since(nc.lastPing) > (pingInterval + rwTimeout) {
-				log.Debug("nodeControl::manager lost heartbeat")
+				log.Debug("NodeController::manager lost heartbeat")
 				return
 			}
 
 		case mRaw, ok := <-nc.in:
 			// c.in closes to indicate shutdown
 			if !ok {
-				log.Debug("nodeControl::manager chan bc.in closed")
+				log.Debug("NodeController::manager chan bc.in closed")
 				return
 			}
 
-			//log.Debug("nodeControl::manager PING")
+			//log.Debug("NodeController::manager PING")
 			if _, ok := mRaw.(*Ping); ok {
 				nc.lastPing = time.Now()
 				// don't crash on panic
 				if err := util.PanicToError(func() { nc.out <- new(Pong) }); err != nil {
-					log.Debug("nodeControl::manager send message to bc.out error: %v", err)
+					log.Debug("NodeController::manager send message to bc.out error: %v", err)
 					return
 				}
-				//log.Debug("nodeControl::manager PONG")
+				//log.Debug("NodeController::manager PONG")
 			}
 		}
 	}
 }
 
-func (nc *nodeControl) writer() {
+func (nc *NodeController) writer() {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Error("nodeControl::writer recover with error: %v, stack: %s", err, debug.Stack())
+			log.Error("NodeController::writer recover with error: %v, stack: %s", err, debug.Stack())
 		}
 	}()
 
@@ -313,16 +331,16 @@ func (nc *nodeControl) writer() {
 		nc.ctlConn.SetWriteDeadline(time.Now().Add(rwTimeout))
 		if err := WriteMsg(nc.ctlConn, m); err != nil {
 			// bc.conn may be closed
-			log.Debug("nodeControl::writer WriteMsg error: %v", err)
+			log.Debug("NodeController::writer WriteMsg error: %v", err)
 			return
 		}
 	}
 }
 
-func (nc *nodeControl) reader() {
+func (nc *NodeController) reader() {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Error("nodeControl::reader recover with error: %v, stack: %s", err, debug.Stack())
+			log.Error("NodeController::reader recover with error: %v, stack: %s", err, debug.Stack())
 		}
 	}()
 
@@ -335,22 +353,22 @@ func (nc *nodeControl) reader() {
 	// read messages from the control channel
 	for {
 		if message, err := ReadMsg(nc.ctlConn); err != nil {
-			log.Debug("nodeControl::read message: %v", err)
+			log.Debug("NodeController::read message: %v", err)
 			return
 		} else {
 			// this can also panic during shutdown
 			if err := util.PanicToError(func() { nc.in <- message }); err != nil {
-				log.Debug("nodeControl::reader bc.in <- message error: %v", err)
+				log.Debug("NodeController::reader bc.in <- message error: %v", err)
 				return
 			}
 		}
 	}
 }
 
-func (nc *nodeControl) stopper() {
+func (nc *NodeController) stopper() {
 	defer func() {
 		if err := recover(); err != nil {
-			log.Error("nodeControl::stopper recover with error: %v, stack: %s", err, debug.Stack())
+			log.Error("NodeController::stopper recover with error: %v, stack: %s", err, debug.Stack())
 		}
 	}()
 
@@ -368,7 +386,7 @@ func (nc *nodeControl) stopper() {
 	nc.plumbers.Clean()
 
 	// remove myself from the control registry
-	nc.broker.registry.Del(nc.id, nc)
+	nc.broker.controllers.Del(nc.id, nc)
 
 	// shutdown manager() so that we have no more work to do
 	close(nc.in)
@@ -393,7 +411,7 @@ func (nc *nodeControl) stopper() {
 	}
 	wg.Wait()
 
-	log.Debug("nodeControl::stopper shutdown %s complete!", nc.id)
+	log.Debug("NodeController::stopper shutdown %s complete!", nc.id)
 }
 
 // Remove a tunnel connection from the pool and return it
@@ -401,7 +419,7 @@ func (nc *nodeControl) stopper() {
 // and wait until it is available
 // Returns an error if we couldn't get a tunnel because it took too long
 // or the tunnel is closing
-func (nc *nodeControl) getTunnel(reqBrokerMsg *ReqBroker) (tunConn net.Conn, err error) {
+func (nc *NodeController) getTunnel(reqBrokerMsg *ReqBroker) (tunConn net.Conn, err error) {
 	var ok bool
 	for {
 		for {
@@ -411,14 +429,14 @@ func (nc *nodeControl) getTunnel(reqBrokerMsg *ReqBroker) (tunConn net.Conn, err
 				if !ok {
 					return nil, errors.New("no tunnel connections available, control is closing")
 				}
-				log.Debug("nodeControl::getTunnel get a tunnel connection from pool")
+				log.Debug("NodeController::getTunnel get a tunnel connection from pool")
 				goto end
 			default:
 				// no tunnel available in the pool, ask for one over the control channel
-				log.Debug("nodeControl::getTunnel no tunnel in pool, send ReqTunnel message...")
+				log.Debug("NodeController::getTunnel no tunnel in pool, send ReqTunnel message...")
 				if err = util.PanicToError(func() { nc.out <- new(ReqTunnel) }); err != nil {
 					// c.out is closed, impossible to get a tunnel connection
-					log.Debug("nodeControl::getTunnel send message to c.out error: %v", err)
+					log.Debug("NodeController::getTunnel send message to c.out error: %v", err)
 					return
 				}
 
@@ -431,7 +449,7 @@ func (nc *nodeControl) getTunnel(reqBrokerMsg *ReqBroker) (tunConn net.Conn, err
 						return nil, errors.New("no tunnel connections available, control is closing")
 					}
 				}
-				log.Debug("nodeControl::getTunnel get a tunnel connection after sending ReqTunnel")
+				log.Debug("NodeController::getTunnel get a tunnel connection after sending ReqTunnel")
 				goto end
 			}
 		}
@@ -441,7 +459,7 @@ func (nc *nodeControl) getTunnel(reqBrokerMsg *ReqBroker) (tunConn net.Conn, err
 			// try to send StartTunnel message
 			if err := WriteMsg(tunConn, &StartTunnel{*reqBrokerMsg}); err != nil {
 				// this tunnel connection is reached deadline
-				log.Debug("nodeControl::getTunnel failed to send ping: %v", err)
+				log.Debug("NodeController::getTunnel failed to send ping: %v", err)
 				tunConn.Close()
 				tunConn = nil
 				continue
@@ -451,14 +469,14 @@ func (nc *nodeControl) getTunnel(reqBrokerMsg *ReqBroker) (tunConn net.Conn, err
 			resp := new(AccessResp)
 			tunConn.SetReadDeadline(time.Now().Add(rwTimeout))
 			if err := ReadMsgInto(tunConn, resp); err != nil {
-				log.Debug("nodeControl::getTunnel failed to receive response message: %v", err)
+				log.Debug("NodeController::getTunnel failed to receive response message: %v", err)
 				tunConn.Close()
 				tunConn = nil
 				continue
 			}
 
 			if resp.Error != "" {
-				log.Debug("nodeControl::getTunnel failed with response: %s", resp.Error)
+				log.Debug("NodeController::getTunnel failed with response: %s", resp.Error)
 				tunConn.Close()
 				return nil, errors.New(resp.Error)
 			}
@@ -473,12 +491,12 @@ func (nc *nodeControl) getTunnel(reqBrokerMsg *ReqBroker) (tunConn net.Conn, err
 	return
 }
 
-func (nc *nodeControl) regTunnel(pxyConn net.Conn) {
+func (nc *NodeController) regTunnel(pxyConn net.Conn) {
 	select {
 	case nc.tunnels <- pxyConn:
 		pxyConn.SetDeadline(time.Now().Add(pxyStaleDuration))
 	default:
-		log.Debug("nodeControl::regTunnel proxies buffer is full, discarding.")
+		log.Debug("NodeController::regTunnel proxies buffer is full, discarding.")
 		pxyConn.Close()
 	}
 }
