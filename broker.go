@@ -29,6 +29,10 @@ func NewBroker(getAuthenticate AuthenticateFunc, reqBrokerPermission ReqBrokerPe
 	}
 }
 
+func (b *Broker) ListenAddr() net.Addr {
+	return b.listener.Addr()
+}
+
 func (b *Broker) Run(listenerAddr string, tlsConfig *tls.Config) (err error) {
 	if b.listener, err = NewListener("tcp", listenerAddr, tlsConfig); err != nil {
 		return log.Error("listening %s error: %v", listenerAddr, err)
@@ -165,6 +169,10 @@ func (b *Broker) tunnel(pxyConn net.Conn, reqTunnel *RegTunnel) {
 
 	log.Debug("Broker::tunnel registering new tunnel for %s", reqTunnel.Auth.Id)
 	ctl.regTunnel(pxyConn)
+}
+
+func (b *Broker) Broker(srcConn net.Conn, reqBrokerMsg *ReqBroker) {
+	b.broker(srcConn, reqBrokerMsg)
 }
 
 func (b *Broker) broker(srcConn net.Conn, reqBrokerMsg *ReqBroker) {
